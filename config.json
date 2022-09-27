@@ -1,0 +1,11 @@
+{
+    "DdlAddressEth" : "0xf22845D0D68A0Aa8f3393054dA86D95CdeF7B47F",
+    "DdlAddressBtc" : "0x338cf52614539680b981204f3828823EbD48b921",
+    "PsqlUrl": "",
+    "BlockCreate" : 27035296,
+    "Web3LocalProviderUrl": "http://127.0.0.1:8545",
+    "Web3ProviderUrl": "",
+    "PrivateKey": "",
+    "TelegramToken": "",
+    "ChatID" : 
+}
