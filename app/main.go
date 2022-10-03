@@ -3,13 +3,13 @@ package main
 import (
 	"ddl/liq/database"
 	"ddl/liq/ddl_contract"
+	"ddl/liq/recoverer"
+	"ddl/liq/telegram"
 	"encoding/json"
 	"io/ioutil"
 	"log"
 	"strconv"
 	"time"
-
-	tgbotapi "github.com/Syfaro/telegram-bot-api"
 )
 
 type SymbolContract struct {
@@ -50,65 +50,77 @@ func main() {
 		},
 	}
 	db := database.NewDataBase(conf.PsqlUrl)
-	bot, err := tgbotapi.NewBotAPI(conf.TelegramToken)
-	if err != nil {
-		panic(err)
+	botTelegram := telegram.NewTelegram(conf.TelegramToken, conf.ChatID)
+	rec := recoverer.Recoverer{
+		PrintError: func(x string) { botTelegram.SendMessage(x) },
+		SleepTime:  10,
 	}
-	bot.Debug = true
 	for {
 		start := new(database.LastUpdate)
 		db.Select(start)
 		fromBlock := start.BlockNumber
 		for _, cont := range arrContrats {
-			arrBorrow := cont.Contract.GetBorrowEvent(fromBlock)
-			log.Println("arrBorrow", arrBorrow)
+			var arrBorrow []database.Options
+			rec.RecoverPanicFunction(func() { arrBorrow = cont.Contract.GetBorrowEvent(fromBlock) })
 			for _, v := range arrBorrow {
-				db.InsertTable(&database.Options{ID: v.ID, State: v.State, Symbol: cont.Symbol})
+				rec.RecoverPanicFunction(func() {
+					db.InsertTable(&database.Options{ID: v.ID, State: v.State, Symbol: cont.Symbol})
+				})
 			}
+			var UnlockEvents []database.Options
+			var LiquidateEvents []database.Options
+			var ForcedExerciseEvents []database.Options
+			var ExerciseByPriorLiqPriceEvents []database.Options
+
+			rec.RecoverPanicFunction(func() { UnlockEvents = cont.Contract.GetUnlockEvent(fromBlock) })
+			rec.RecoverPanicFunction(func() { LiquidateEvents = cont.Contract.GetLiquidateEvent(fromBlock) })
+			rec.RecoverPanicFunction(func() { ForcedExerciseEvents = cont.Contract.GetForcedExerciseEvent(fromBlock) })
+			rec.RecoverPanicFunction(func() { ExerciseByPriorLiqPriceEvents = cont.Contract.GetExerciseByPriorLiqPriceEvent(fromBlock) })
+
 			arrCloseEvents := append(
-				cont.Contract.GetUnlockEvent(fromBlock),
+				UnlockEvents,
 				append(
-					cont.Contract.GetLiquidateEvent(fromBlock),
+					LiquidateEvents,
 					append(
-						cont.Contract.GetForcedExerciseEvent(fromBlock),
-						cont.Contract.GetExerciseByPriorLiqPriceEvent(fromBlock)...,
+						ForcedExerciseEvents,
+						ExerciseByPriorLiqPriceEvents...,
 					)...,
 				)...)
 			for _, v := range arrCloseEvents {
-				db.UpdateTableByID(&database.Options{ID: v.ID, State: v.State, Symbol: cont.Symbol}, v.ID)
+				rec.RecoverPanicFunction(func() {
+					db.UpdateTableByID(&database.Options{ID: v.ID, State: v.State, Symbol: cont.Symbol}, v.ID)
+				})
 			}
 		}
-		db.UpdateTable(&database.LastUpdate{BlockNumber: arrContrats[0].Contract.GetCurrentBlock()})
+		rec.RecoverPanicFunction(func() {
+			db.UpdateTable(&database.LastUpdate{BlockNumber: arrContrats[0].Contract.GetCurrentBlock()})
+		})
 		for _, cont := range arrContrats {
-			log.Println("Check ", cont.Symbol)
-			msg := tgbotapi.NewMessage(conf.ChatID, "Check "+cont.Symbol)
-			bot.Send(msg)
-			arrActive := db.SelectActiveOptions(cont.Symbol)
+			botTelegram.SendMessage("Check " + cont.Symbol)
+			var arrActive []database.Options
+			rec.RecoverPanicFunction(func() { arrActive = db.SelectActiveOptions(cont.Symbol) })
 			log.Println(arrActive)
 			for _, option := range arrActive {
-				msg := tgbotapi.NewMessage(conf.ChatID, "Active option: "+strconv.FormatUint(option.ID, 10))
-				bot.Send(msg)
-				if cont.Contract.LoanState(option.ID) {
-					cont.Contract.Liquidate(option.ID)
-					log.Println("Liquidate id: " + strconv.FormatUint(option.ID, 10))
-					msg := tgbotapi.NewMessage(conf.ChatID, "Liquidate id: "+strconv.FormatUint(option.ID, 10))
-					bot.Send(msg)
-				} else if cont.Contract.IsOptionExpired(option.ID) {
-					cont.Contract.ForcedExercise(option.ID)
-					log.Println("ForcedExercise id: " + strconv.FormatUint(option.ID, 10))
-					msg := tgbotapi.NewMessage(conf.ChatID, "ForcedExercise id: "+strconv.FormatUint(option.ID, 10))
-					bot.Send(msg)
-				} else if cont.Contract.LoanStateByPriorLiqPrice(option.ID) {
-					cont.Contract.ExerciseByPriorLiqPrice(option.ID)
-					log.Println("ExerciseByPriorLiqPrice id: " + strconv.FormatUint(option.ID, 10))
-					msg := tgbotapi.NewMessage(conf.ChatID, "ExerciseByPriorLiqPrice id: "+strconv.FormatUint(option.ID, 10))
-					bot.Send(msg)
+				botTelegram.SendMessage("Active option: " + strconv.FormatUint(option.ID, 10))
+				var LoanState bool
+				var IsOptionExpired bool
+				var LoanStateByPriorLiqPrice bool
+				rec.RecoverPanicFunction(func() { LoanState = cont.Contract.LoanState(option.ID) })
+				rec.RecoverPanicFunction(func() { IsOptionExpired = cont.Contract.IsOptionExpired(option.ID) })
+				rec.RecoverPanicFunction(func() { LoanStateByPriorLiqPrice = cont.Contract.LoanStateByPriorLiqPrice(option.ID) })
+				if LoanState {
+					rec.RecoverPanicFunction(func() { cont.Contract.Liquidate(option.ID) })
+					botTelegram.SendMessage("Liquidate id: " + strconv.FormatUint(option.ID, 10))
+				} else if IsOptionExpired {
+					rec.RecoverPanicFunction(func() { cont.Contract.ForcedExercise(option.ID) })
+					botTelegram.SendMessage("ForcedExercise id: " + strconv.FormatUint(option.ID, 10))
+				} else if LoanStateByPriorLiqPrice {
+					rec.RecoverPanicFunction(func() { cont.Contract.ExerciseByPriorLiqPrice(option.ID) })
+					botTelegram.SendMessage("ExerciseByPriorLiqPrice id: " + strconv.FormatUint(option.ID, 10))
 				}
 			}
 		}
-		msg := tgbotapi.NewMessage(conf.ChatID, "wait 60 seconds...")
-		bot.Send(msg)
-		log.Println("wait 60 seconds...")
+		botTelegram.SendMessage("wait 60 seconds...")
 		time.Sleep(60 * time.Second)
 	}
 
